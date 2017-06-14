@@ -4,10 +4,11 @@ include $(CLEAR_VARS)
 
 LOCAL_DEFAULT_CPP_EXTENSION := cpp
 
-LOCAL_MODULE := test_google_breakpad
-LOCAL_SRC_FILES := test_breakpad.cpp
+LOCAL_MODULE := google_breakpad
+LOCAL_SRC_FILES := google_breakpad.cpp
 LOCAL_STATIC_LIBRARIES += breakpad_client
 LOCAL_LDLIBS := -L$(SYSROOT)/usr/lib -llog
+APP_CXXFLAGS := -std=c++11 -D__STDC_LIMIT_MACROS
 
 include $(BUILD_SHARED_LIBRARY)
 

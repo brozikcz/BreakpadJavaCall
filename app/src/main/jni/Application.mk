@@ -28,4 +28,8 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 APP_STL := stlport_static
-APP_ABI := armeabi armeabi-v7a x86
+APP_ABI := armeabi-v7a
+APP_PLATFORM := android-16
+TARGET_PLATFORM := android-16
+APP_CXXFLAGS := -std=c++11 -D__STDC_LIMIT_MACROS
+#APP_OPTIM := debug

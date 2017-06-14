@@ -48,7 +48,7 @@
 # The top Google Breakpad directory.
 # We assume this Android.mk to be under 'android/google_breakpad'
 
-LOCAL_PATH := $(call my-dir)/
+LOCAL_PATH := $(call my-dir)
 
 # Defube the client library module, as a simple static library that
 # exports the right include path / linker flags to its users.
@@ -71,12 +71,11 @@ LOCAL_ARM_MODE := arm
 # List of client source files, directly taken from Makefile.am
 LOCAL_SRC_FILES := \
     src/client/linux/crash_generation/crash_generation_client.cc \
+    src/client/linux/dump_writer_common/thread_info.cc \
+    src/client/linux/dump_writer_common/ucontext_reader.cc \
     src/client/linux/handler/exception_handler.cc \
     src/client/linux/handler/minidump_descriptor.cc \
     src/client/linux/log/log.cc \
-    src/client/linux/dump_writer_common/thread_info.cc \
-    src/client/linux/dump_writer_common/seccomp_unwinder.cc \
-    src/client/linux/dump_writer_common/ucontext_reader.cc \
     src/client/linux/microdump_writer/microdump_writer.cc \
     src/client/linux/minidump_writer/linux_dumper.cc \
     src/client/linux/minidump_writer/linux_ptrace_dumper.cc \

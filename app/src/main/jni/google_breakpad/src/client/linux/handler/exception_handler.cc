@@ -118,7 +118,7 @@ namespace {
 // all these signals must be Core (see man 7 signal) because we rethrow the
 // signal after handling it and expect that it'll be fatal.
 const int kExceptionSignals[] = {
-  SIGSEGV, SIGABRT, SIGFPE, SIGILL, SIGBUS
+  SIGSEGV, SIGABRT, SIGFPE, SIGILL, SIGBUS, SIGTRAP
 };
 const int kNumHandledSignals =
     sizeof(kExceptionSignals) / sizeof(kExceptionSignals[0]);
@@ -212,6 +212,12 @@ void InstallDefaultHandler(int sig) {
 std::vector<ExceptionHandler*>* g_handler_stack_ = NULL;
 pthread_mutex_t g_handler_stack_mutex_ = PTHREAD_MUTEX_INITIALIZER;
 
+// sizeof(CrashContext) can be too big w.r.t the size of alternatate stack
+// for SignalHandler(). Keep the crash context as a .bss field. Exception
+// handlers are serialized by the |g_handler_stack_mutex_| and at most one at a
+// time can use |g_crash_context_|.
+ExceptionHandler::CrashContext g_crash_context_;
+
 }  // namespace
 
 // Runs before crashing: normal context.
@@ -233,7 +239,17 @@ ExceptionHandler::ExceptionHandler(const MinidumpDescriptor& descriptor,
       !minidump_descriptor_.IsMicrodumpOnConsole())
     minidump_descriptor_.UpdatePath();
 
+#if defined(__ANDROID__)
+  if (minidump_descriptor_.IsMicrodumpOnConsole())
+    logger::initializeCrashLogWriter();
+#endif
+
   pthread_mutex_lock(&g_handler_stack_mutex_);
+
+  // Pre-fault the crash context struct. This is to avoid failing due to OOM
+  // if handling an exception when the process ran out of virtual memory.
+  memset(&g_crash_context_, 0, sizeof(g_crash_context_));
+
   if (!g_handler_stack_)
     g_handler_stack_ = new std::vector<ExceptionHandler*>;
   if (install_handler) {
@@ -398,9 +414,14 @@ struct ThreadArgument {
 int ExceptionHandler::ThreadEntry(void *arg) {
   const ThreadArgument *thread_arg = reinterpret_cast<ThreadArgument*>(arg);
 
+  // Close the write end of the pipe. This allows us to fail if the parent dies
+  // while waiting for the continue signal.
+  sys_close(thread_arg->handler->fdes[1]);
+
   // Block here until the crashing process unblocks us when
   // we're allowed to use ptrace
   thread_arg->handler->WaitForContinueSignal();
+  sys_close(thread_arg->handler->fdes[0]);
 
   return thread_arg->handler->DoDump(thread_arg->pid, thread_arg->context,
                                      thread_arg->context_size) == false;
@@ -408,7 +429,7 @@ int ExceptionHandler::ThreadEntry(void *arg) {
 
 // This function runs in a compromised context: see the top of the file.
 // Runs on the crashing thread.
-bool ExceptionHandler::HandleSignal(int sig, siginfo_t* info, void* uc) {
+bool ExceptionHandler::HandleSignal(int /*sig*/, siginfo_t* info, void* uc) {
   if (filter_ && !filter_(callback_context_))
     return false;
 
@@ -419,36 +440,37 @@ bool ExceptionHandler::HandleSignal(int sig, siginfo_t* info, void* uc) {
   if (signal_trusted || (signal_pid_trusted && info->si_pid == getpid())) {
     sys_prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
   }
-  CrashContext context;
+
   // Fill in all the holes in the struct to make Valgrind happy.
-  memset(&context, 0, sizeof(context));
-  memcpy(&context.siginfo, info, sizeof(siginfo_t));
-  memcpy(&context.context, uc, sizeof(struct ucontext));
+  memset(&g_crash_context_, 0, sizeof(g_crash_context_));
+  memcpy(&g_crash_context_.siginfo, info, sizeof(siginfo_t));
+  memcpy(&g_crash_context_.context, uc, sizeof(struct ucontext));
 #if defined(__aarch64__)
-  struct ucontext *uc_ptr = (struct ucontext*)uc;
-  struct fpsimd_context *fp_ptr =
+  struct ucontext* uc_ptr = (struct ucontext*)uc;
+  struct fpsimd_context* fp_ptr =
       (struct fpsimd_context*)&uc_ptr->uc_mcontext.__reserved;
   if (fp_ptr->head.magic == FPSIMD_MAGIC) {
-    memcpy(&context.float_state, fp_ptr, sizeof(context.float_state));
+    memcpy(&g_crash_context_.float_state, fp_ptr,
+           sizeof(g_crash_context_.float_state));
   }
-#elif !defined(__ARM_EABI__)  && !defined(__mips__)
+#elif !defined(__ARM_EABI__) && !defined(__mips__)
   // FP state is not part of user ABI on ARM Linux.
   // In case of MIPS Linux FP state is already part of struct ucontext
   // and 'float_state' is not a member of CrashContext.
-  struct ucontext *uc_ptr = (struct ucontext*)uc;
+  struct ucontext* uc_ptr = (struct ucontext*)uc;
   if (uc_ptr->uc_mcontext.fpregs) {
-    memcpy(&context.float_state,
-           uc_ptr->uc_mcontext.fpregs,
-           sizeof(context.float_state));
+    memcpy(&g_crash_context_.float_state, uc_ptr->uc_mcontext.fpregs,
+           sizeof(g_crash_context_.float_state));
   }
 #endif
-  context.tid = syscall(__NR_gettid);
+  g_crash_context_.tid = syscall(__NR_gettid);
   if (crash_handler_ != NULL) {
-    if (crash_handler_(&context, sizeof(context), callback_context_)) {
+    if (crash_handler_(&g_crash_context_, sizeof(g_crash_context_),
+                       callback_context_)) {
       return true;
     }
   }
-  return GenerateDump(&context);
+  return GenerateDump(&g_crash_context_);
 }
 
 // This is a public interface to HandleSignal that allows the client to
@@ -506,21 +528,22 @@ bool ExceptionHandler::GenerateDump(CrashContext *context) {
   }
 
   const pid_t child = sys_clone(
-      ThreadEntry, stack, CLONE_FILES | CLONE_FS | CLONE_UNTRACED,
-      &thread_arg, NULL, NULL, NULL);
+      ThreadEntry, stack, CLONE_FS | CLONE_UNTRACED, &thread_arg, NULL, NULL,
+      NULL);
   if (child == -1) {
     sys_close(fdes[0]);
     sys_close(fdes[1]);
     return false;
   }
 
+  // Close the read end of the pipe.
+  sys_close(fdes[0]);
   // Allow the child to ptrace us
   sys_prctl(PR_SET_PTRACER, child, 0, 0, 0);
   SendContinueSignalToChild();
   int status;
   const int r = HANDLE_EINTR(sys_waitpid(child, &status, __WALL));
 
-  sys_close(fdes[0]);
   sys_close(fdes[1]);
 
   if (r == -1) {
@@ -569,14 +592,21 @@ void ExceptionHandler::WaitForContinueSignal() {
 // Runs on the cloned process.
 bool ExceptionHandler::DoDump(pid_t crashing_process, const void* context,
                               size_t context_size) {
+  const bool may_skip_dump =
+      minidump_descriptor_.skip_dump_if_principal_mapping_not_referenced();
+  const uintptr_t principal_mapping_address =
+      minidump_descriptor_.address_within_principal_mapping();
+  const bool sanitize_stacks = minidump_descriptor_.sanitize_stacks();
   if (minidump_descriptor_.IsMicrodumpOnConsole()) {
     return google_breakpad::WriteMicrodump(
         crashing_process,
         context,
         context_size,
         mapping_list_,
-        minidump_descriptor_.microdump_build_fingerprint(),
-        minidump_descriptor_.microdump_product_info());
+        may_skip_dump,
+        principal_mapping_address,
+        sanitize_stacks,
+        *minidump_descriptor_.microdump_extra_info());
   }
   if (minidump_descriptor_.IsFD()) {
     return google_breakpad::WriteMinidump(minidump_descriptor_.fd(),
@@ -585,7 +615,10 @@ bool ExceptionHandler::DoDump(pid_t crashing_process, const void* context,
                                           context,
                                           context_size,
                                           mapping_list_,
-                                          app_memory_list_);
+                                          app_memory_list_,
+                                          may_skip_dump,
+                                          principal_mapping_address,
+                                          sanitize_stacks);
   }
   return google_breakpad::WriteMinidump(minidump_descriptor_.path(),
                                         minidump_descriptor_.size_limit(),
@@ -593,7 +626,10 @@ bool ExceptionHandler::DoDump(pid_t crashing_process, const void* context,
                                         context,
                                         context_size,
                                         mapping_list_,
-                                        app_memory_list_);
+                                        app_memory_list_,
+                                        may_skip_dump,
+                                        principal_mapping_address,
+                                        sanitize_stacks);
 }
 
 // static

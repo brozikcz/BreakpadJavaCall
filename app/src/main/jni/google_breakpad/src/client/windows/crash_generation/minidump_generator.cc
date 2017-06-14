@@ -259,8 +259,9 @@ MinidumpGenerator::MinidumpGenerator(
     const MINIDUMP_TYPE dump_type,
     const bool is_client_pointers)
     : dbghelp_module_(NULL),
+      write_dump_(NULL),
       rpcrt4_module_(NULL),
-      dump_path_(dump_path),
+      create_uuid_(NULL),
       process_handle_(process_handle),
       process_id_(process_id),
       thread_id_(thread_id),
@@ -269,14 +270,15 @@ MinidumpGenerator::MinidumpGenerator(
       assert_info_(assert_info),
       dump_type_(dump_type),
       is_client_pointers_(is_client_pointers),
+      dump_path_(dump_path),
+      uuid_generated_(false),
       dump_file_(INVALID_HANDLE_VALUE),
       full_dump_file_(INVALID_HANDLE_VALUE),
       dump_file_is_internal_(false),
       full_dump_file_is_internal_(false),
       additional_streams_(NULL),
-      callback_info_(NULL),
-      write_dump_(NULL),
-      create_uuid_(NULL) {
+      callback_info_(NULL) {
+  uuid_ = {0};
   InitializeCriticalSection(&module_load_sync_);
   InitializeCriticalSection(&get_proc_address_sync_);
 }
@@ -562,15 +564,17 @@ MinidumpGenerator::UuidCreateType MinidumpGenerator::GetCreateUuid() {
 }
 
 bool MinidumpGenerator::GenerateDumpFilePath(wstring* file_path) {
-  UUID id = {0};
+  if (!uuid_generated_) {
+    UuidCreateType create_uuid = GetCreateUuid();
+    if (!create_uuid) {
+      return false;
+    }
 
-  UuidCreateType create_uuid = GetCreateUuid();
-  if (!create_uuid) {
-    return false;
+    create_uuid(&uuid_);
+    uuid_generated_ = true;
   }
 
-  create_uuid(&id);
-  wstring id_str = GUIDString::GUIDToWString(&id);
+  wstring id_str = GUIDString::GUIDToWString(&uuid_);
 
   *file_path = dump_path_ + TEXT("\\") + id_str + TEXT(".dmp");
   return true;

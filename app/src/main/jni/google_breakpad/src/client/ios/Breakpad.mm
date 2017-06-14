@@ -263,8 +263,8 @@ void Breakpad::UncaughtExceptionHandler(NSException *exception) {
   NSSetUncaughtExceptionHandler(NULL);
   if (current_breakpad_) {
     current_breakpad_->HandleUncaughtException(exception);
+    BreakpadRelease(current_breakpad_);
   }
-  BreakpadRelease(current_breakpad_);
 }
 
 //=============================================================================
@@ -341,7 +341,7 @@ bool Breakpad::ExtractParameters(NSDictionary *parameters) {
     }
   }
 
-  if (!version)
+  if (!version.length)  // Default nil or empty string to CFBundleVersion
     version = [parameters objectForKey:@"CFBundleVersion"];
 
   if (!vendor) {
